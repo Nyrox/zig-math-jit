@@ -6,10 +6,16 @@ const Op = enum(u32) {
     Sub,
     Mul,
     Div,
+    Pow,
+    Sqrt,
+    Sin,
+    Cos,
+    Tan,
     Print,
 };
 
 const StackError = error{OutOfMemory, OutOfValues};
+const ITERATIONS: usize = std.math.pow(usize, 10, 6);
 
 fn Stack(comptime T: type) type {
     return struct {
@@ -51,10 +57,54 @@ pub fn execute(code: []const u32, constBuf: []const f32, stack: *Stack(f32)) Sta
 
                 try stack.push(arg1 + arg2);
             },
+            Op.Sub => {
+                const arg1 = try stack.pop();
+                const arg2 = try stack.pop();
+
+                try stack.push(arg2 - arg1);
+            },
+            Op.Mul => {
+                const arg1 = try stack.pop();
+                const arg2 = try stack.pop();
+
+                try stack.push(arg1 * arg2);
+            },
+            Op.Div => {
+                const arg1 = try stack.pop();
+                const arg2 = try stack.pop();
+
+                try stack.push(arg2 / arg1);
+            },
+            Op.Pow => {
+                const arg1 = try stack.pop();
+                const arg2 = try stack.pop();
+
+                try stack.push(std.math.pow(f32, arg2, arg1));
+            },
+            Op.Sqrt => {
+                const arg1 = try stack.pop();
+
+                try stack.push(std.math.sqrt(arg1));
+            },
+            Op.Sin => {
+                const arg1 = try stack.pop();
+
+                try stack.push(std.math.sin(arg1));
+            },
+            Op.Cos => {
+                const arg1 = try stack.pop();
+
+                try stack.push(std.math.cos(arg1));
+            },
+            Op.Tan => {
+                const arg1 = try stack.pop();
+
+                try stack.push(std.math.tan(arg1));
+            },
             Op.Print => {
                 std.log.info("Print: {}\n", .{try stack.pop()});
             },
-            else => @panic("illegal instruction")
+            // else => @panic("illegal instruction {}")
         }
     }
 }
@@ -97,10 +147,13 @@ pub fn main() anyerror!void {
                 const offset = bytecode.code.items[i] * 4;
                 const offsetBytes = @ptrCast([*]const u8, &offset);
                 _ = offsetBytes;
+                const val = bytecode.consts.items[offset / 4];
+                const valBytes = @ptrCast([*]const u8, &val);
 
                 var instructions = [_]u8{
-                    0xf3, 0x0f, 0x10, 0x83, offsetBytes[0], offsetBytes[1], offsetBytes[2], offsetBytes[3], // movss  xmm0,DWORD PTR [rbx+rcx*4]
-                    0xf3, 0x0f, 0x11, 0x00, // movss DWORD PTR [rax], xmm0
+                    // 0xf3, 0x0f, 0x10, 0x83, offsetBytes[0], offsetBytes[1], offsetBytes[2], offsetBytes[3], // movss  xmm0,DWORD PTR [rbx+rcx*4]
+                    // 0xf3, 0x0f, 0x11, 0x00, // movss DWORD PTR [rax], xmm0
+                    0xc7, 0x00, valBytes[0], valBytes[1], valBytes[2], valBytes[3], // mov DWORD PTR [rax], val
                     0x48, 0x83, 0xc0, 0x04, // add rax, 0x4
                 };
 
@@ -159,7 +212,7 @@ pub fn main() anyerror!void {
 
     var ret: f32 = 0.0;
     
-    for (range(100000)) |_| {
+    for (range(ITERATIONS)) |_| {
         ret = asm volatile ("call *%%rcx" : [ret] "={xmm0}" (-> f32) :
             [unholyRegion] "{rcx}" (unholyRegion.ptr),
             [a] "{rax}" (stackMemory.ptr),
@@ -170,7 +223,7 @@ pub fn main() anyerror!void {
     const endTime = std.time.milliTimestamp();
 
     std.log.err("Stack pointer: {*}", .{
-        asm volatile("nop": [ret] "={rax}" (-> *const f32))});
+    asm volatile("nop": [ret] "={rax}" (-> *const f32))});
     std.log.err("Executed unholy code: {}", .{ret});
     std.log.err("Stack top: {}", .{stackMemory.ptr[0]});
     std.log.err("Execution time (ms): {}", .{endTime - startTime});
@@ -188,10 +241,10 @@ pub fn generate_bytecode(allocator: std.mem.Allocator) anyerror ! Bytecode {
     var rand = std.rand.DefaultPrng.init(109275125);
     _ = rand;
 
-    const n = 1024;
+    const n = 4096;
 
     for (range(n)) |_, i| {
-        try consts.append(@intToFloat(f32, i + 1));
+        try consts.append(rand.random().float(f32) * 5.0);
         try code.append(@enumToInt(Op.Const));
         try code.append(@intCast(u32, i));
     }
@@ -211,14 +264,14 @@ pub fn generate_bytecode(allocator: std.mem.Allocator) anyerror ! Bytecode {
 }
 
 pub fn stackVM(allocator: std.mem.Allocator, bytecode: Bytecode) anyerror!void {
-    const startTime = std.time.milliTimestamp();
 
     var stackMemory: []f32 = try allocator.alloc(f32, 1024 * 1024 * 1024);
     defer allocator.free(stackMemory);
-
     const stack = &Stack(f32){ .data = stackMemory, .len = 0 };
 
-    for (range(100000)) |_| {   
+    const startTime = std.time.milliTimestamp();
+
+    for (range(ITERATIONS)) |_| {   
         try execute(bytecode.code.items, bytecode.consts.items, stack);
     }
 

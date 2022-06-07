@@ -1,117 +1,10 @@
 const std = @import("std");
+const vm = @import("./vm.zig");
+const spec = @import("./spec.zig");
+const utils = @import("./utils.zig");
 
-const Op = enum(u32) {
-    Const = 1,
-    Add,
-    Sub,
-    Mul,
-    Div,
-    Pow,
-    Sqrt,
-    Sin,
-    Cos,
-    Tan,
-    Print,
-};
-
-const StackError = error{OutOfMemory, OutOfValues};
 const ITERATIONS: usize = std.math.pow(usize, 10, 6);
 
-fn Stack(comptime T: type) type {
-    return struct {
-        data: []T,
-        len: usize,
-
-        pub fn push(self: *@This(), v: T) StackError!void {
-            if (self.len == self.data.len) return StackError.OutOfMemory;
-
-            self.data[self.len] = v;
-            self.len += 1;
-        }
-
-        pub fn pop(self: *@This()) StackError!T {
-            if (self.len == 0) return StackError.OutOfValues;
-
-            self.len -= 1;
-
-            return self.data[self.len];
-        }
-    };
-}
-
-pub fn execute(code: []const u32, constBuf: []const f32, stack: *Stack(f32)) StackError!void {
-    var pc: usize = 0;
-
-    while (pc < code.len): (pc += 1) {
-        switch (@intToEnum(Op, code[pc])) {
-            Op.Const => {
-                const i = code[pc + 1];
-                const arg = constBuf[i];
-
-                try stack.push(arg);
-                pc += 1;
-            },
-            Op.Add => {
-                const arg1 = try stack.pop();
-                const arg2 = try stack.pop();
-
-                try stack.push(arg1 + arg2);
-            },
-            Op.Sub => {
-                const arg1 = try stack.pop();
-                const arg2 = try stack.pop();
-
-                try stack.push(arg2 - arg1);
-            },
-            Op.Mul => {
-                const arg1 = try stack.pop();
-                const arg2 = try stack.pop();
-
-                try stack.push(arg1 * arg2);
-            },
-            Op.Div => {
-                const arg1 = try stack.pop();
-                const arg2 = try stack.pop();
-
-                try stack.push(arg2 / arg1);
-            },
-            Op.Pow => {
-                const arg1 = try stack.pop();
-                const arg2 = try stack.pop();
-
-                try stack.push(std.math.pow(f32, arg2, arg1));
-            },
-            Op.Sqrt => {
-                const arg1 = try stack.pop();
-
-                try stack.push(std.math.sqrt(arg1));
-            },
-            Op.Sin => {
-                const arg1 = try stack.pop();
-
-                try stack.push(std.math.sin(arg1));
-            },
-            Op.Cos => {
-                const arg1 = try stack.pop();
-
-                try stack.push(std.math.cos(arg1));
-            },
-            Op.Tan => {
-                const arg1 = try stack.pop();
-
-                try stack.push(std.math.tan(arg1));
-            },
-            Op.Print => {
-                std.log.info("Print: {}\n", .{try stack.pop()});
-            },
-            // else => @panic("illegal instruction {}")
-        }
-    }
-}
-
-pub fn range(len: usize) []const void {
-    return @as([*]void, undefined)[0..len];
-}
 
 const Prot = struct {
     const PROT_NONE: u32 = 0x00;
@@ -133,149 +26,66 @@ pub fn main() anyerror!void {
     
     defer { _ = gpa.deinit(); }
 
-    const bytecode = try generate_bytecode(allocator);
+    const bytecode = try spec.generate_bytecode(allocator);
 
-    try stackVM(allocator, bytecode);
+    const jitted = try @import("targets/x86_64.zig").compile_bytecode(allocator, bytecode);
 
-    var code = std.ArrayList(u8).init(allocator);
-
-    var i: usize = 0;
-    while (i < bytecode.code.items.len): (i += 1) {
-        switch (@intToEnum(Op, bytecode.code.items[i])) {
-            Op.Const => {
-                i += 1;
-                const offset = bytecode.code.items[i] * 4;
-                const offsetBytes = @ptrCast([*]const u8, &offset);
-                _ = offsetBytes;
-                const val = bytecode.consts.items[offset / 4];
-                const valBytes = @ptrCast([*]const u8, &val);
-
-                var instructions = [_]u8{
-                    // 0xf3, 0x0f, 0x10, 0x83, offsetBytes[0], offsetBytes[1], offsetBytes[2], offsetBytes[3], // movss  xmm0,DWORD PTR [rbx+rcx*4]
-                    // 0xf3, 0x0f, 0x11, 0x00, // movss DWORD PTR [rax], xmm0
-                    0xc7, 0x00, valBytes[0], valBytes[1], valBytes[2], valBytes[3], // mov DWORD PTR [rax], val
-                    0x48, 0x83, 0xc0, 0x04, // add rax, 0x4
-                };
-
-                try code.appendSlice(instructions[0..]);
-            },
-            Op.Add => {
-                var instructions = [_]u8{
-                    0x48, 0x83, 0xe8, 0x04, // sub rax,0x4
-                    0xf3, 0x0f, 0x10, 0x40, 0xfc, // movss xmm0,DWORD PTR [rax-0x4]
-                    0xf3, 0x0f, 0x58, 0x00, // addss xmm0,DWORD PTR [rax]
-                    0xf3, 0x0f, 0x11, 0x40, 0xfc, // movss DWORD PTR [rax-0x4],xmm0
-                };
-
-                try code.appendSlice(instructions[0..]);
-            },
-            Op.Print => {
-                var instructions = [_]u8{
-                    0x48, 0x83, 0xe8, 0x04, // sub rax,0x4
-                };
-
-                try code.appendSlice(instructions[0..]);
-            },
-            else => @panic("Illegal instruction")
-        }
-    }
-
-
-    try code.appendSlice(([_]u8{0xf3, 0x0f, 0x10, 0x40, 0xfc})[0..]);
-    try code.append(0xc3);
-
-
-    var unholyRegion = try std.os.mmap(null, code.items.len, Prot.PROT_READ | Prot.PROT_EXEC | Prot.PROT_WRITE, MAP_JIT | MAP_PRIVATE | MAP_ANON, 0, 0);
+    var unholyRegion = try std.os.mmap(null, jitted.items.len, Prot.PROT_READ | Prot.PROT_EXEC | Prot.PROT_WRITE, MAP_JIT | MAP_PRIVATE | MAP_ANON, 0, 0);
     std.log.info("Allocate unholy region!", .{});
 
     c.pthread_jit_write_protect_np(0);
 
-
-    std.mem.copy(u8, unholyRegion, code.items);
+    std.mem.copy(u8, unholyRegion, jitted.items);
 
     c.pthread_jit_write_protect_np(1);
 
     std.log.info("Wrote unholy code!", .{});
 
-
-    var stackMemory: []f32 = try allocator.alloc(f32, 1024 * 1024 * 1024);
-    defer code.deinit();
-    defer allocator.free(stackMemory);
+    defer jitted.deinit();
     defer bytecode.code.deinit();
     defer bytecode.consts.deinit();
 
-    std.log.err("Stack base: {*}", .{ stackMemory.ptr });
-    std.log.err("Consts buffer base: {*}", .{ bytecode.consts.items.ptr });
-    std.log.err("Execution base: {*}", .{ unholyRegion.ptr });
-
-    const startTime = std.time.milliTimestamp();
-
-    var ret: f32 = 0.0;
-    
-    for (range(ITERATIONS)) |_| {
-        ret = asm volatile ("call *%%rcx" : [ret] "={xmm0}" (-> f32) :
-            [unholyRegion] "{rcx}" (unholyRegion.ptr),
-            [a] "{rax}" (stackMemory.ptr),
-            [b] "{rbx}" (bytecode.consts.items.ptr),
-        );
-    }
-
-    const endTime = std.time.milliTimestamp();
-
-    std.log.err("Stack pointer: {*}", .{
-    asm volatile("nop": [ret] "={rax}" (-> *const f32))});
-    std.log.err("Executed unholy code: {}", .{ret});
-    std.log.err("Stack top: {}", .{stackMemory.ptr[0]});
-    std.log.err("Execution time (ms): {}", .{endTime - startTime});
-}
-
-const Bytecode = struct {
-    code: std.ArrayList(u32),
-    consts: std.ArrayList(f32),
-};
-
-pub fn generate_bytecode(allocator: std.mem.Allocator) anyerror ! Bytecode {
-    var code = std.ArrayList(u32).init(allocator);
-    var consts = std.ArrayList(f32).init(allocator);
-
-    var rand = std.rand.DefaultPrng.init(109275125);
-    _ = rand;
-
-    const n = 4096;
-
-    for (range(n)) |_, i| {
-        try consts.append(rand.random().float(f32) * 5.0);
-        try code.append(@enumToInt(Op.Const));
-        try code.append(@intCast(u32, i));
-    }
-    
-    var reductionN: usize = 0;
-    for (range(std.math.log2(n))) |_, i| {
-        reductionN += std.math.pow(usize, 2, i);
-    }
-
-    for (range(reductionN)) |_| {
-        try code.append(@enumToInt(Op.Add));
-    }
-
-    try code.append(@enumToInt(Op.Print));
-
-    return Bytecode{ .code=code, .consts=consts };
-}
-
-pub fn stackVM(allocator: std.mem.Allocator, bytecode: Bytecode) anyerror!void {
-
     var stackMemory: []f32 = try allocator.alloc(f32, 1024 * 1024 * 1024);
     defer allocator.free(stackMemory);
-    const stack = &Stack(f32){ .data = stackMemory, .len = 0 };
 
-    const startTime = std.time.milliTimestamp();
+    { // stack vm
+        std.log.err("Beginning VM execution", .{});
 
-    for (range(ITERATIONS)) |_| {   
-        try execute(bytecode.code.items, bytecode.consts.items, stack);
+        const startTime = std.time.milliTimestamp();
+
+        var stack = vm.Stack(f32).init(stackMemory);
+        
+        for (utils.range(ITERATIONS)) |_| {
+            try vm.run(bytecode, &stack);
+        }
+
+        const endTime = std.time.milliTimestamp();
+        std.log.err("VM execution time (ms): {}", .{endTime - startTime});
     }
 
-    const endTime = std.time.milliTimestamp();
+    { // jitted code
+        std.log.err("Beginning JIT execution", .{});
+        std.log.err("Stack base: {*}", .{ stackMemory.ptr });
+        std.log.err("Execution base: {*}", .{ unholyRegion.ptr });
 
-    std.log.err("Stack VM Execution time: {}\n", .{endTime - startTime});
+        const startTime = std.time.milliTimestamp();
+
+        for (utils.range(ITERATIONS)) |_| {
+            asm volatile ("call *%%rcx" ::
+                [unholyRegion] "{rcx}" (unholyRegion.ptr),
+                [a] "{rdx}" (stackMemory.ptr),
+            );
+        }
+
+        const ret = asm volatile("movss (%%rdx), %%xmm0": [_] "={xmm0}" (-> f32));
+
+        const stackptr = asm volatile("nop": [_] "={rdx}" (-> *const f32));
+
+        const endTime = std.time.milliTimestamp();
+
+        std.log.err("Stack pointer: {*}", .{ stackptr });
+        std.log.err("Executed unholy code: {}", .{ret});
+        std.log.err("Stack top: {}", .{stackMemory.ptr[0]});
+        std.log.err("JIT execution time (ms): {}", .{endTime - startTime});
+    }
 }
